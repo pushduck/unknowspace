@@ -236,11 +236,11 @@ create_config() {
 # 使用检测到的最佳封禁动作
 banaction = ${banaction}
 
-# 封禁一小时
-bantime = 1h
-# 在10分钟内超过5次失败即封禁
+# 封禁23小时
+bantime = 23h
+# 在10分钟内超过3次失败即封禁
 findtime = 10m
-maxretry = 5
+maxretry = 3
 
 # --- SSHD Protection ---
 [sshd]
