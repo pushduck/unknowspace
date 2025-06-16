@@ -565,7 +565,7 @@ EOF
     
     # 构造测试消息
     hostname_f=$(hostname -f)
-    test_message="✅ *Fail2Ban 配置成功* ✅%0A%0A监控告警已为服务器 \`$public_ip\` (*$hostname_f*) 开启。%0A%0A_这是一条自动发送的测试消息。_"
+    test_message="✅ *Fail2Ban 配置成功* ✅\n\n监控告警已为服务器 \`$public_ip\` (*$hostname_f*) 开启。\n\n_这是一条自动发送的测试消息。_"
 
     # 使用 curl 发送测试消息
     test_response=$(curl -s --max-time 15 -X POST "https://api.telegram.org/bot${bot_token}/sendMessage" \
