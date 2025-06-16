@@ -514,6 +514,12 @@ PORT="$4"
 HOSTNAME=$(hostname -f)
 LOG_DATE=$(date)
 
+# 查询 whois 信息
+WHOIS_INFO=$(whois $IP | grep -E "Country|OrgName|City|StateProv" | tr '\n' '; ')
+
+# 查询 GeoIP 信息
+GEOIP_INFO=$(geoiplookup $IP | grep "GeoIP City" | awk -F": " '{print $2}')
+
 # Message formatting for Markdown
 MESSAGE="🛡️ *Fail2Ban Alert* 🛡️
 
@@ -523,7 +529,9 @@ MESSAGE="🛡️ *Fail2Ban Alert* 🛡️
 *Banned IP:* \`${IP}\`
 *Jail Name:* \`${JAIL}\`
 *Protocol:* \`${PROTOCOL}\`
-*Port:* \`${PORT}\`"
+*Port:* \`${PORT}\`
+*Whois Info:* \`${WHOIS_INFO}\`
+*GeoIP Info:* \`${GEOIP_INFO}\`"
 
 # API URL
 URL="https://api.telegram.org/bot${BOT_TOKEN}/sendMessage"
