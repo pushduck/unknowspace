@@ -3,19 +3,20 @@
 # =================================================================
 # Fail2ban 智能管理脚本
 # Author: Gemini
-# Version: 2.4
+# Version: 2.6
+#
+# 更新日志 (v2.6):
+# - 修复: 修复了配置Telegram通知时，向 jail.local 写入了错误的 '%%(action_)s' (双百分号) 的问题，
+#         导致Fail2ban无法解析默认action而启动失败。
+#
+# 更新日志 (v2.5):
+# - 修复: 修复了在某些系统上配置Telegram通知时，因sed兼容性问题导致的 "can't find label" 错误。
 #
 # 更新日志 (v2.4):
 # - 新增: 配置Telegram通知后，自动发送一条测试消息以验证配置。
 #
 # 更新日志 (v2.3):
 # - 新增: 配置 Telegram Bot 通知功能 (菜单选项 8)。
-#
-# 更新日志 (v2.2):
-# - 新增: 修改核心配置的功能 (bantime, findtime, maxretry)。
-#
-# 更新日志 (v2.1):
-# - 新增: 自动检测并禁用系统日志压缩，防止Fail2ban因'message repeated'而漏掉日志。
 #
 # 功能:
 # - 自动检测并适配包管理器 (apt, dnf, yum)
@@ -255,6 +256,7 @@ maxretry = 1
 # --- SSHD Protection ---
 [sshd]
 enabled = true
+port = ssh,sftp
 EOF
 
     # 步骤 4: 智能判断并配置 sshd 日志后端
@@ -431,6 +433,19 @@ modify_config() {
     fi
 }
 
+get_public_ip() {
+    # 获取公网 IP 地址
+    local public_ip=$(curl -s --max-time 10 api.ipify.org)
+    if [ -z "$public_ip" ]; then
+        # 如果获取公网 IP 失败，则回退到内网 IP 或主机名
+        public_ip=$(hostname -I | awk '{print $1}')
+        if [ -z "$public_ip" ]; then
+            public_ip="<IP无法获取>"
+        fi
+    fi
+    echo "$public_ip"
+}
+
 
 # 8. 配置 Telegram 通知
 configure_telegram() {
@@ -477,6 +492,8 @@ actionban = ${TELEGRAM_NOTIFY_SCRIPT} "<ip>" "<name>" "<protocol>" "<port>"
 EOF
 
     echo -e "${BLUE}📝 正在创建 Telegram 通知脚本...${NC}"
+    # 获取公网 IP 地址
+    public_ip=$(get_public_ip)
     # 创建通知脚本
     # 注意：这里的 EOF 需要用引号括起来，防止脚本内的变量被当前shell解析
     cat > "$TELEGRAM_NOTIFY_SCRIPT" << 'EOF'
@@ -498,9 +515,9 @@ HOSTNAME=$(hostname -f)
 LOG_DATE=$(date)
 
 # Message formatting for Markdown
-MESSAGE="🛡️ *Fail2Ban Alert on ${HOSTNAME}* 🛡️
+MESSAGE="🛡️ *Fail2Ban Alert* 🛡️
 
-A host has just been banned by Fail2Ban.
+**Hostname： \`${HOSTNAME}\`**
 
 *Timestamp:* \`${LOG_DATE}\`
 *Banned IP:* \`${IP}\`
@@ -541,31 +558,23 @@ EOF
         # 为防止冲突，先删除 [sshd] 中可能存在的旧 action 行
         sed -i '/^\[sshd\]/,/^\[/ { /^\s*action\s*=/d; }' "$JAIL_LOCAL_CONF"
 
+        # --- FIX START: Use correct single '%' for fail2ban variables ---
         # 在 [sshd] 标题后添加新的组合 action
         # 这将同时执行默认的封禁动作 (%(action_)) 和 telegram 通知
-        # 使用 printf 和 sed 来处理换行符，以获得更好的可移植性
-        local new_action
-        new_action=$(printf "action = %%(action_)s\n         telegram")
-        sed -i "/^\[sshd\]/a ${new_action}" "$JAIL_LOCAL_CONF"
+        sed -i '/^\[sshd\]/a action = %(action_)s' "$JAIL_LOCAL_CONF"
+        sed -i '/^action = %(action_)s/a \         telegram' "$JAIL_LOCAL_CONF"
+        # --- FIX END ---
+        
         echo -e "${GREEN}✅ 已为 [sshd] 监牢启用 Telegram 通知。${NC}"
     fi
 
     # --- ★★★ 新增：发送测试消息 ★★★ ---
     echo -e "${BLUE}🚀 正在发送测试消息以验证配置...${NC}"
 
-    # 获取公网 IP 地址
-    public_ip=$(curl -s --max-time 10 api.ipify.org)
-    if [ -z "$public_ip" ]; then
-        # 如果获取公网 IP 失败，则回退到内网 IP 或主机名
-        public_ip=$(hostname -I | awk '{print $1}')
-        if [ -z "$public_ip" ]; then
-            public_ip="<IP无法获取>"
-        fi
-    fi
     
     # 构造测试消息
     hostname_f=$(hostname -f)
-    test_message="✅ *Fail2Ban 配置成功* ✅\n\n监控告警已为服务器 \`$public_ip\` (*$hostname_f*) 开启。\n\n_这是一条自动发送的测试消息。_"
+    test_message="✅ *Fail2Ban 配置成功* ✅ | 监控告警已为服务器 \`$public_ip\` (*$hostname_f*) 开启。[_这是一条自动发送的测试消息。_]"
 
     # 使用 curl 发送测试消息
     test_response=$(curl -s --max-time 15 -X POST "https://api.telegram.org/bot${bot_token}/sendMessage" \
@@ -603,7 +612,7 @@ main_menu() {
     clear
     while true; do
         echo ""
-        echo -e "${BLUE}--- Fail2ban 智能管理脚本 (v2.4) ---${NC}"
+        echo -e "${BLUE}--- Fail2ban 智能管理脚本 (v2.6) ---${NC}"
         echo " 1. 安装 Fail2ban (自动配置并启动)"
         echo " 2. 卸载 Fail2ban"
         echo " ---------------------------------------"
