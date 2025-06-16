@@ -180,13 +180,34 @@ maxretry = 5
 enabled = true
 EOF
 
-    # 步骤 4: 智能判断 sshd 日志后端
+    # 步骤 3: 智能判断并配置 sshd 日志后端
     if [ -f /var/log/auth.log ] || [ -f /var/log/secure ]; then
         echo -e "${GREEN}🔎 检测到传统日志文件，为 [sshd] 使用 logpath。${NC}"
         echo "logpath = %(sshd_log)s" >> "$JAIL_LOCAL_CONF"
         echo "backend = auto" >> "$JAIL_LOCAL_CONF"
     else
         echo -e "${GREEN}🔎 未检测到 auth.log/secure，为 [sshd] 使用 systemd 后端。${NC}"
+        
+        # 检查 systemd 的 Python 模块依赖
+        if ! python3 -c "import systemd.journal" &>/dev/null; then
+            echo -e "${YELLOW}⚠️ Fail2ban 需要 'python3-systemd' 模块来读取 systemd 日志。${NC}"
+            read -p "❓ 是否现在安装它? [Y/n]: " choice
+            if [[ -z "$choice" || "$choice" =~ ^[Yy]$ ]]; then
+                echo -e "${BLUE}⚙️  正在安装 python3-systemd...${NC}"
+                case "$PKG_MANAGER" in
+                    apt) apt-get install -y python3-systemd ;;
+                    dnf|yum) "$PKG_MANAGER" install -y python3-systemd ;;
+                esac
+                if ! python3 -c "import systemd.journal" &>/dev/null; then
+                    echo -e "${RED}❌ 错误：python3-systemd 安装失败。请手动解决。${NC}"
+                    exit 1
+                fi
+            else
+                echo -e "${RED}❌ 操作取消。无法在没有 python3-systemd 的情况下使用 systemd 后端。${NC}"
+                exit 1
+            fi
+        fi
+        
         echo "backend = systemd" >> "$JAIL_LOCAL_CONF"
     fi
 
