@@ -3,7 +3,10 @@
 # =================================================================
 # Fail2ban 智能管理脚本
 # Author: Gemini
-# Version: 2.3
+# Version: 2.4
+#
+# 更新日志 (v2.4):
+# - 新增: 配置Telegram通知后，自动发送一条测试消息以验证配置。
 #
 # 更新日志 (v2.3):
 # - 新增: 配置 Telegram Bot 通知功能 (菜单选项 8)。
@@ -429,7 +432,7 @@ modify_config() {
 }
 
 
-# ★★★ 新增：8. 配置 Telegram 通知 ★★★
+# 8. 配置 Telegram 通知
 configure_telegram() {
     # 检查 curl 是否安装
     if ! command -v curl &> /dev/null; then
@@ -547,7 +550,45 @@ EOF
         echo -e "${GREEN}✅ 已为 [sshd] 监牢启用 Telegram 通知。${NC}"
     fi
 
-    echo -e "${GREEN}🎉 Telegram 通知配置完成！${NC}"
+    # --- ★★★ 新增：发送测试消息 ★★★ ---
+    echo -e "${BLUE}🚀 正在发送测试消息以验证配置...${NC}"
+
+    # 获取公网 IP 地址
+    public_ip=$(curl -s --max-time 10 api.ipify.org)
+    if [ -z "$public_ip" ]; then
+        # 如果获取公网 IP 失败，则回退到内网 IP 或主机名
+        public_ip=$(hostname -I | awk '{print $1}')
+        if [ -z "$public_ip" ]; then
+            public_ip="<IP无法获取>"
+        fi
+    fi
+    
+    # 构造测试消息
+    hostname_f=$(hostname -f)
+    test_message="✅ *Fail2Ban 配置成功* ✅%0A%0A监控告警已为服务器 \`$public_ip\` (*$hostname_f*) 开启。%0A%0A_这是一条自动发送的测试消息。_"
+
+    # 使用 curl 发送测试消息
+    test_response=$(curl -s --max-time 15 -X POST "https://api.telegram.org/bot${bot_token}/sendMessage" \
+        --data-urlencode "chat_id=${chat_id}" \
+        --data-urlencode "text=${test_message}" \
+        -d "parse_mode=Markdown")
+
+    # 检查 Telegram API 的返回结果
+    if echo "$test_response" | grep -q '"ok":true'; then
+        echo -e "${GREEN}✅ 测试消息发送成功！请检查您的 Telegram。${NC}"
+    else
+        echo -e "${RED}❌ 测试消息发送失败。${NC}"
+        echo -e "${YELLOW}👉 请检查您的 Bot Token 和 Chat ID 是否正确，以及服务器网络是否能访问 Telegram API。${NC}"
+        # 尝试从返回的 JSON 中提取错误描述
+        error_desc=$(echo "$test_response" | grep -o '"description":"[^"]*"' | cut -d '"' -f 4)
+        if [ -n "$error_desc" ]; then
+            echo -e "${YELLOW}   Telegram API 返回错误: ${error_desc}${NC}"
+        fi
+    fi
+    # --- ★★★ 测试消息结束 ★★★ ---
+
+    echo "" # 添加一个空行以改善格式
+
     read -p "❓ 是否立即重启 Fail2ban 服务以应用新配置? [Y/n]: " choice
     if [[ -z "$choice" || "$choice" =~ ^[Yy]$ ]]; then
         start_service
@@ -562,7 +603,7 @@ main_menu() {
     clear
     while true; do
         echo ""
-        echo -e "${BLUE}--- Fail2ban 智能管理脚本 (v2.3) ---${NC}"
+        echo -e "${BLUE}--- Fail2ban 智能管理脚本 (v2.4) ---${NC}"
         echo " 1. 安装 Fail2ban (自动配置并启动)"
         echo " 2. 卸载 Fail2ban"
         echo " ---------------------------------------"
@@ -571,7 +612,7 @@ main_menu() {
         echo " 5. 查看 SSHD 防护状态和日志"
         echo " 6. 查看当前本地配置文件"
         echo " 7. 修改 Fail2ban 核心配置"
-        echo -e "${GREEN} 8. 配置 Telegram 通知${NC}"
+        echo -e "${GREEN} 8. 配置 Telegram 通知 (含测试)${NC}"
         echo " 0. 退出脚本"
         echo -e "${BLUE}---------------------------------------${NC}"
         read -p "请输入选项 [0-8]: " option
