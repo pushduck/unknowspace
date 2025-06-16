@@ -1,376 +1,304 @@
 #!/bin/bash
 
-# ==============================================================================
-# Fail2ban 交互式管理脚本
+# =================================================================
+# Fail2ban 智能管理脚本
+# Author: Gemini
+# Version: 2.0
 #
 # 功能:
-#   - 提供菜单式交互界面
-#   - 安装、卸载、修改配置
-#   - 启动、停止、重启服务
-#   - 查看日志、黑名单
-#   - 手动封禁、解封 IP
-#
-# 最后更新: 2025-06-16
-# ==============================================================================
+# - 自动检测并适配包管理器 (apt, dnf, yum)
+# - 智能检测防火墙后端 (nftables/iptables)，并自动配置
+# - 当无防火墙时，交互式提示用户安装
+# - 智能检测 SSHD 日志后端 (systemd/log file)
+# - 提供安装、卸载、启停、查看日志和配置的菜单
+# =================================================================
 
-# --- 脚本常量与颜色定义 ---
-JAIL_LOCAL_PATH="/etc/fail2ban/jail.local"
-LOG_PATH="/var/log/fail2ban.log"
+# --- 脚本配置 ---
+# 使用颜色输出，增强可读性
+RED='\e[31m'
+GREEN='\e[32m'
+YELLOW='\e[33m'
+BLUE='\e[34m'
+NC='\e[0m' # No Color
 
-# 颜色定义
-C_RESET='\033[0m'
-C_RED='\033[0;31m'
-C_GREEN='\033[0;32m'
-C_YELLOW='\033[0;33m'
-C_BLUE='\033[0;34m'
-C_CYAN='\033[0;36m'
+# --- 全局变量 ---
+PKG_MANAGER=""
+FAIL2BAN_SERVICE="fail2ban"
+JAIL_LOCAL_CONF="/etc/fail2ban/jail.local"
+SSHD_JAIL_NAME="sshd"
 
-# --- 辅助函数 ---
-
-# 打印带颜色的信息
-_log() {
-    local color="$1"
-    local message="$2"
-    echo -e "${color}${message}${C_RESET}"
-}
-
-# 暂停脚本，等待用户按键
-_pause() {
-    echo ""
-    read -n 1 -s -r -p "按任意键返回菜单..."
-}
+# --- 内部函数 ---
 
 # 检查是否以 root 权限运行
-_check_root() {
-    if [ "$(id -u)" -ne "0" ]; then
-        _log "$C_RED" "错误：此脚本必须以 root 权限运行。"
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+       echo -e "${RED}❌ 错误：此脚本需要以 root 或 sudo 权限运行。${NC}" 
+       exit 1
+    fi
+}
+
+# 检测包管理器
+detect_pkg_manager() {
+    if command -v apt-get &> /dev/null; then
+        PKG_MANAGER="apt"
+    elif command -v dnf &> /dev/null; then
+        PKG_MANAGER="dnf"
+    elif command -v yum &> /dev/null; then
+        PKG_MANAGER="yum"
+    else
+        echo -e "${RED}❌ 错误：无法检测到支持的包管理器 (apt, dnf, yum)。${NC}"
         exit 1
     fi
 }
 
 # 检查 Fail2ban 是否已安装
-_check_installed() {
-    if ! command -v fail2ban-client &> /dev/null; then
-        _log "$C_YELLOW" "Fail2ban 尚未安装。"
-        return 1
-    else
-        return 0
-    fi
+is_installed() {
+    command -v fail2ban-client &> /dev/null
 }
 
-# 获取操作系统包管理器
-_get_pkg_manager() {
-    if command -v apt-get &> /dev/null; then
-        echo "apt-get"
-    elif command -v dnf &> /dev/null; then
-        echo "dnf"
-    elif command -v yum &> /dev/null; then
-        echo "yum"
-    else
-        _log "$C_RED" "错误：未找到支持的包管理器 (apt-get, dnf, yum)。"
+# 1. 安装 Fail2ban
+install_fail2ban() {
+    if is_installed; then
+        echo -e "${GREEN}✅ 信息：Fail2ban 已安装。${NC}"
+        return
+    fi
+    
+    echo -e "${BLUE}⚙️  正在安装 Fail2ban...${NC}"
+    case "$PKG_MANAGER" in
+        apt)
+            apt-get update && apt-get install -y fail2ban
+            ;;
+        dnf|yum)
+            # RHEL/CentOS 可能需要 epel-release
+            if ! rpm -q epel-release &>/dev/null; then
+                echo -e "${YELLOW}正在安装 EPEL release...${NC}"
+                "$PKG_MANAGER" install -y epel-release
+            fi
+            "$PKG_MANAGER" install -y fail2ban
+            ;;
+    esac
+
+    if ! is_installed; then
+        echo -e "${RED}❌ 错误：Fail2ban 安装失败。${NC}"
         exit 1
     fi
+    
+    echo -e "${GREEN}✅ 安装成功！${NC}"
+    
+    # 核心步骤：创建配置并启动
+    create_config
+    start_service
 }
 
-# 生成配置文件
-_generate_config_file() {
-    local ignore_ip=$1
-    local ban_time=$2
-    local max_retry=$3
-    local ssh_port=$4
-    local ssh_max_retry=$5
+# 2. 卸载 Fail2ban
+uninstall_fail2ban() {
+    if ! is_installed; then
+        echo -e "${GREEN}✅ 信息：Fail2ban 未安装。${NC}"
+        return
+    fi
+    
+    stop_service
+    echo -e "${BLUE}⚙️  正在卸载 Fail2ban...${NC}"
+    case "$PKG_MANAGER" in
+        apt)
+            apt-get purge -y --auto-remove fail2ban
+            ;;
+        dnf|yum)
+            "$PKG_MANAGER" remove -y fail2ban
+            ;;
+    esac
+    
+    # 清理配置文件
+    if [ -d /etc/fail2ban ]; then
+        read -p "❓ 是否删除所有配置文件 /etc/fail2ban? [y/N]: " choice
+        if [[ "$choice" =~ ^[Yy]$ ]]; then
+            rm -rf /etc/fail2ban
+            echo -e "${YELLOW}🔥 已删除配置文件。${NC}"
+        fi
+    fi
+    
+    echo -e "${GREEN}✅ 卸载完成。${NC}"
+}
 
-    _log "$C_BLUE" "正在创建配置文件: $JAIL_LOCAL_PATH"
-    if [ -f "$JAIL_LOCAL_PATH" ]; then
-        mv "$JAIL_LOCAL_PATH" "${JAIL_LOCAL_PATH}.bak_$(date +%F_%T)"
+# ★★★ 创建配置文件 (核心优化逻辑) ★★★
+create_config() {
+    echo -e "${BLUE}📝 正在分析系统环境并创建自定义配置文件...${NC}"
+    local banaction=""
+
+    # 步骤 1: 智能检测防火墙后端
+    if command -v nft &> /dev/null; then
+        echo -e "${GREEN}🔎 检测到 nftables，将使用它作为防火墙后端。${NC}"
+        banaction="nftables-multiport"
+    elif command -v iptables &> /dev/null; then
+        echo -e "${GREEN}🔎 检测到 iptables，将使用它作为防火墙后端。${NC}"
+        banaction="iptables-multiport"
+    else
+        # 步骤 2: 当没有防火墙时，与用户交互
+        echo -e "${YELLOW}⚠️ 警告：未找到防火墙工具 (nftables 或 iptables)。${NC}"
+        echo -e "${YELLOW}Fail2ban 需要其中之一才能封禁 IP 地址。${NC}"
+        read -p "❓ 是否现在安装 nftables (推荐)? [Y/n]: " choice
+        
+        # 如果用户输入 'y', 'Y' 或直接回车
+        if [[ -z "$choice" || "$choice" =~ ^[Yy]$ ]]; then
+            echo -e "${BLUE}⚙️  正在安装 nftables...${NC}"
+            case "$PKG_MANAGER" in
+                apt) apt-get install -y nftables ;;
+                dnf|yum) "$PKG_MANAGER" install -y nftables ;;
+            esac
+            
+            if command -v nft &> /dev/null; then
+                echo -e "${GREEN}✅ nftables 安装成功。${NC}"
+                banaction="nftables-multiport"
+            else
+                echo -e "${RED}❌ 错误：nftables 安装失败。请手动安装后再试。${NC}"
+                exit 1
+            fi
+        else
+            echo -e "${RED}❌ 操作取消。请先手动安装 nftables 或 iptables。${NC}"
+            exit 1
+        fi
     fi
 
-    cat << EOF > "$JAIL_LOCAL_PATH"
-[DEFAULT]
-ignoreip = ${ignore_ip}
-bantime  = ${ban_time}
-findtime = 10m
-maxretry = ${max_retry}
-banaction = iptables-multiport
+    # 步骤 3: 写入配置文件
+    echo -e "${BLUE}📝 正在写入配置文件到 $JAIL_LOCAL_CONF...${NC}"
+    cat > "$JAIL_LOCAL_CONF" << EOF
+# This file is auto-generated by fail2ban_manager.sh
+# Do not edit jail.conf, edit this file for your local overrides.
 
+[DEFAULT]
+# 使用检测到的最佳封禁动作
+banaction = ${banaction}
+
+# 封禁一小时
+bantime = 1h
+# 在10分钟内超过5次失败即封禁
+findtime = 10m
+maxretry = 5
+
+# --- SSHD Protection ---
 [sshd]
 enabled = true
-port    = ${ssh_port}
-maxretry = ${ssh_max_retry}
 EOF
-    _log "$C_GREEN" "配置文件已更新。"
+
+    # 步骤 4: 智能判断 sshd 日志后端
+    if [ -f /var/log/auth.log ] || [ -f /var/log/secure ]; then
+        echo -e "${GREEN}🔎 检测到传统日志文件，为 [sshd] 使用 logpath。${NC}"
+        echo "logpath = %(sshd_log)s" >> "$JAIL_LOCAL_CONF"
+        echo "backend = auto" >> "$JAIL_LOCAL_CONF"
+    else
+        echo -e "${GREEN}🔎 未检测到 auth.log/secure，为 [sshd] 使用 systemd 后端。${NC}"
+        echo "backend = systemd" >> "$JAIL_LOCAL_CONF"
+    fi
+
+    echo -e "${GREEN}✅ 配置文件创建成功！${NC}"
 }
 
-
-# --- 核心功能函数 ---
-
-# 1. 安装与配置 Fail2ban
-fn_install() {
-    if _check_installed; then
-        _log "$C_YELLOW" "Fail2ban 已安装。您想重新配置吗？[y/N]"
-        read -r choice
-        if [[ ! "$choice" =~ ^[Yy]$ ]]; then
-            return
-        fi
+# 3. 启动服务
+start_service() {
+    if ! is_installed; then
+        echo -e "${RED}❌ 错误：请先安装 Fail2ban。${NC}"
+        return
     fi
     
-    _log "$C_CYAN" "--- 开始安装与配置 Fail2ban ---"
-
-    # 获取用户配置
-    read -p "请输入您的白名单 IP (多个用空格隔开, 强烈建议添加本机公网IP): " ignore_ip
-    ignore_ip="127.0.0.1/8 ::1 ${ignore_ip}"
+    echo -e "${BLUE}🚀 正在启动并设置 Fail2ban 开机自启...${NC}"
+    systemctl unmask "$FAIL2BAN_SERVICE" &> /dev/null
+    systemctl enable "$FAIL2BAN_SERVICE"
+    systemctl restart "$FAIL2BAN_SERVICE" # 使用 restart 确保配置重载
     
-    read -p "请输入全局封禁时间 (例如 1d, 2h, 30m) [默认: 1d]: " ban_time
-    [ -z "$ban_time" ] && ban_time="1d"
-    
-    read -p "请输入全局最大重试次数 [默认: 5]: " max_retry
-    [ -z "$max_retry" ] && max_retry="5"
-    
-    read -p "请输入 SSH 服务的端口号 [默认: 22]: " ssh_port
-    [ -z "$ssh_port" ] && ssh_port="22"
-
-    read -p "请输入 SSH 服务的最大重试次数 [默认: 3]: " ssh_max_retry
-    [ -z "$ssh_max_retry" ] && ssh_max_retry="3"
-
-    # 安装
-    PKG_MANAGER=$(_get_pkg_manager)
-    _log "$C_BLUE" "正在使用 $PKG_MANAGER 安装 Fail2ban..."
-    if [ "$PKG_MANAGER" = "apt-get" ]; then
-        $PKG_MANAGER update > /dev/null
+    sleep 1 # 等待服务启动
+    if systemctl is-active --quiet "$FAIL2BAN_SERVICE"; then
+        echo -e "${GREEN}✅ Fail2ban 已成功启动并运行。${NC}"
+    else
+        echo -e "${RED}❌ 错误：Fail2ban 启动失败。${NC}"
+        echo -e "${YELLOW}请使用 'journalctl -xeu fail2ban' 或 'cat /var/log/fail2ban.log' 查看详细错误。${NC}"
     fi
-    if [ "$PKG_MANAGER" = "yum" ] || [ "$PKG_MANAGER" = "dnf" ]; then
-        if ! rpm -q epel-release &> /dev/null; then
-             $PKG_MANAGER install -y epel-release > /dev/null
-        fi
-    fi
-    $PKG_MANAGER install -y fail2ban > /dev/null
-    _log "$C_GREEN" "Fail2ban 安装成功。"
-
-    # 配置
-    _generate_config_file "$ignore_ip" "$ban_time" "$max_retry" "$ssh_port" "$ssh_max_retry"
-    
-    fn_start
 }
 
-# 2. 修改配置
-fn_modify_config() {
-    if [ ! -f "$JAIL_LOCAL_PATH" ]; then
-        _log "$C_RED" "未找到配置文件 $JAIL_LOCAL_PATH。请先执行安装。"
+# 4. 停止服务
+stop_service() {
+    if ! is_installed; then
+        echo -e "${GREEN}✅ 信息：Fail2ban 未安装。${NC}"
         return
     fi
 
-    _log "$C_CYAN" "--- 修改 Fail2ban 配置 ---"
-    _log "$C_BLUE" "将显示当前配置，直接按回车键将保留原值。"
-
-    # 从文件中读取当前配置
-    current_ignore_ip=$(grep -E "^\s*ignoreip\s*=" "$JAIL_LOCAL_PATH" | sed 's/.*=\s*//')
-    current_bantime=$(grep -E "^\s*bantime\s*=" "$JAIL_LOCAL_PATH" | sed 's/.*=\s*//')
-    current_max_retry=$(grep -E "^\s*maxretry\s*=" "$JAIL_LOCAL_PATH" | sed 's/.*=\s*//' | head -n 1) # [DEFAULT]中的值
-    current_ssh_port=$(grep -E "^\s*port\s*=" "$JAIL_LOCAL_PATH" | sed 's/.*=\s*//')
-    current_ssh_max_retry=$(grep -E "^\s*maxretry\s*=" "$JAIL_LOCAL_PATH" | sed 's/.*=\s*//' | tail -n 1) # [sshd]中的值
-
-    read -p "白名单 IP [当前: $current_ignore_ip]: " new_ignore_ip
-    [ -z "$new_ignore_ip" ] && new_ignore_ip=$current_ignore_ip
-
-    read -p "全局封禁时间 [当前: $current_bantime]: " new_bantime
-    [ -z "$new_bantime" ] && new_bantime=$current_bantime
-    
-    read -p "全局最大重试次数 [当前: $current_max_retry]: " new_max_retry
-    [ -z "$new_max_retry" ] && new_max_retry=$current_max_retry
-
-    read -p "SSH 端口 [当前: $current_ssh_port]: " new_ssh_port
-    [ -z "$new_ssh_port" ] && new_ssh_port=$current_ssh_port
-
-    read -p "SSH 最大重试次数 [当前: $current_ssh_max_retry]: " new_ssh_max_retry
-    [ -z "$new_ssh_max_retry" ] && new_ssh_max_retry=$current_ssh_max_retry
-
-    _generate_config_file "$new_ignore_ip" "$new_bantime" "$new_max_retry" "$new_ssh_port" "$new_ssh_max_retry"
-
-    _log "$C_YELLOW" "配置已更新。是否立即重启 Fail2ban 使新配置生效？[Y/n]"
-    read -r choice
-    if [[ ! "$choice" =~ ^[Nn]$ ]]; then
-        fn_start
-    fi
+    echo -e "${BLUE}🛑 正在停止并禁用 Fail2ban 开机自启...${NC}"
+    systemctl stop "$FAIL2BAN_SERVICE"
+    systemctl disable "$FAIL2BAN_SERVICE"
+    echo -e "${GREEN}✅ Fail2ban 已停止。${NC}"
 }
 
-
-# 3. 卸载 Fail2ban
-fn_uninstall() {
-    if ! _check_installed; then return; fi
-    
-    _log "$C_YELLOW" "警告：这将从系统中卸载 Fail2ban。确定要继续吗？[y/N]"
-    read -r choice
-    if [[ ! "$choice" =~ ^[Yy]$ ]]; then
-        _log "$C_GREEN" "操作已取消。"
+# 5. 查看日志 (友好)
+view_log() {
+    if ! is_installed || ! systemctl is-active --quiet "$FAIL2BAN_SERVICE"; then
+        echo -e "${RED}❌ 错误：Fail2ban 未安装或未运行。${NC}"
         return
     fi
 
-    fn_stop
-    PKG_MANAGER=$(_get_pkg_manager)
-    _log "$C_BLUE" "正在使用 $PKG_MANAGER 卸载 Fail2ban..."
-    $PKG_MANAGER remove -y fail2ban > /dev/null
+    echo -e "${BLUE}--- 🛡️  SSHD 防护状态 ---${NC}"
+    fail2ban-client status "$SSHD_JAIL_NAME"
+    echo -e "${BLUE}------------------------${NC}"
     
-    _log "$C_YELLOW" "是否要删除所有配置文件 (/etc/fail2ban)？这是一个不可逆操作！[y/N]"
-    read -r choice
+    read -p "❓ 是否查看实时原始日志 (tail -f /var/log/fail2ban.log)? [y/N]: " choice
     if [[ "$choice" =~ ^[Yy]$ ]]; then
-        rm -rf /etc/fail2ban
-        _log "$C_RED" "配置文件已删除。"
+        echo "按 CTRL+C 退出日志查看。"
+        sleep 1
+        tail -n 50 -f /var/log/fail2ban.log
     fi
-    
-    _log "$C_GREEN" "Fail2ban 卸载完成。"
 }
 
-# 4. 启动 Fail2ban
-fn_start() {
-    if ! _check_installed; then return; fi
-    _log "$C_BLUE" "正在启动并设置 Fail2ban 开机自启..."
-    systemctl enable fail2ban > /dev/null
-    systemctl restart fail2ban
-    sleep 1
-    systemctl status fail2ban --no-pager -l
-}
-
-# 5. 停止 Fail2ban
-fn_stop() {
-    if ! _check_installed; then return; fi
-    _log "$C_BLUE" "正在停止并禁用 Fail2ban 开机自启..."
-    systemctl stop fail2ban
-    systemctl disable fail2ban > /dev/null
-    sleep 1
-    systemctl status fail2ban --no-pager -l
-}
-
-# 6. 查看当前黑名单
-fn_view_banned_list() {
-    if ! _check_installed; then return; fi
-    _log "$C_CYAN" "--- 查看当前黑名单 ---"
-    
-    Jails=$(fail2ban-client status | grep "Jail list" | sed -E 's/.*Jail list:[ \t]+//' | sed 's/,//g')
-    if [ -z "$Jails" ]; then
-        _log "$C_YELLOW" "当前没有活动的 Jail。"
-        return
-    fi
-    
-    _log "$C_BLUE" "当前活动的 Jails: $Jails"
-    for jail in $Jails; do
-        _log "$C_CYAN" "--- Jail: $jail ---"
-        fail2ban-client status "$jail"
-        echo ""
-    done
-}
-
-# 7. 查看所有日志
-fn_view_all_logs() {
-    if ! _check_installed; then return; fi
-    if [ -f "$LOG_PATH" ]; then
-        less "$LOG_PATH"
+# 6. 查看当前配置
+view_config() {
+    if [ -f "$JAIL_LOCAL_CONF" ]; then
+        echo -e "${BLUE}--- 📜  当前配置文件 ($JAIL_LOCAL_CONF) ---${NC}"
+        cat "$JAIL_LOCAL_CONF"
+        echo -e "${BLUE}------------------------------------${NC}"
     else
-        _log "$C_YELLOW" "日志文件不存在: $LOG_PATH"
+        echo -e "${YELLOW}⚠️ 警告：未找到自定义配置文件 $JAIL_LOCAL_CONF。${NC}"
+        if [ -f /etc/fail2ban/jail.conf ]; then
+             echo "你可能正在使用默认配置 /etc/fail2ban/jail.conf，这不被推荐。"
+        fi
     fi
-}
-
-# 8. 查看失败日志 (Ban/Unban)
-fn_view_failure_logs() {
-    if ! _check_installed; then return; fi
-    if [ -f "$LOG_PATH" ]; then
-        _log "$C_CYAN" "--- 仅显示封禁/解封相关日志 ---"
-        grep -E 'Ban|Unban' "$LOG_PATH" | less
-    else
-        _log "$C_YELLOW" "日志文件不存在: $LOG_PATH"
-    fi
-}
-
-# 9. 增加禁止 IP
-fn_ban_ip() {
-    if ! _check_installed; then return; fi
-    _log "$C_CYAN" "--- 手动封禁 IP ---"
-    
-    fail2ban-client status
-    read -p "请输入要操作的 Jail 名称 (例如 sshd): " jail
-    if [ -z "$jail" ]; then
-        _log "$C_RED" "Jail 名称不能为空。"
-        return
-    fi
-
-    read -p "请输入要封禁的 IP 地址: " ip
-    if [ -z "$ip" ]; then
-        _log "$C_RED" "IP 地址不能为空。"
-        return
-    fi
-
-    fail2ban-client set "$jail" banip "$ip"
-    _log "$C_GREEN" "IP $ip 已在 Jail [$jail] 中被封禁。"
-}
-
-# 10. 放行 IP
-fn_unban_ip() {
-    if ! _check_installed; then return; fi
-    _log "$C_CYAN" "--- 手动解封 IP ---"
-    
-    fail2ban-client status
-    read -p "请输入要操作的 Jail 名称 (例如 sshd): " jail
-     if [ -z "$jail" ]; then
-        _log "$C_RED" "Jail 名称不能为空。"
-        return
-    fi
-    
-    read -p "请输入要解封的 IP 地址: " ip
-    if [ -z "$ip" ]; then
-        _log "$C_RED" "IP 地址不能为空。"
-        return
-    fi
-
-    fail2ban-client set "$jail" unbanip "$ip"
-    _log "$C_GREEN" "IP $ip 已在 Jail [$jail] 中被解封。"
 }
 
 
 # --- 主菜单 ---
 main_menu() {
-    _check_root
     clear
-    echo "================================================="
-    _log "$C_CYAN" "          Fail2ban 交互式管理脚本"
-    echo "================================================="
-    echo "  安装与管理"
-    _log "$C_GREEN" "  1. 安装并配置 Fail2ban"
-    _log "$C_YELLOW" "  2. 修改 Fail2ban 配置"
-    _log "$C_RED"   "  3. 卸载 Fail2ban"
-    echo "-------------------------------------------------"
-    echo "  服务控制"
-    _log "$C_GREEN" "  4. 启动并自启 Fail2ban"
-    _log "$C_YELLOW" "  5. 停止并禁用 Fail2ban"
-    echo "-------------------------------------------------"
-    echo "  监控与日志"
-    _log "$C_BLUE" "  6. 查看当前黑名单"
-    _log "$C_BLUE" "  7. 查看所有日志"
-    _log "$C_BLUE" "  8. 查看封禁/解封日志"
-    echo "-------------------------------------------------"
-    echo "  手动操作"
-    _log "$C_RED"   "  9. 手动封禁一个 IP"
-    _log "$C_GREEN" " 10. 手动解封一个 IP"
-    echo "-------------------------------------------------"
-    _log "$C_YELLOW" "   q. 退出脚本"
-    echo "================================================="
-    read -p "请输入您的选项: " choice
-    
-    case $choice in
-        1) fn_install; _pause ;;
-        2) fn_modify_config; _pause ;;
-        3) fn_uninstall; _pause ;;
-        4) fn_start; _pause ;;
-        5) fn_stop; _pause ;;
-        6) fn_view_banned_list; _pause ;;
-        7) fn_view_all_logs; _pause ;;
-        8) fn_view_failure_logs; _pause ;;
-        9) fn_ban_ip; _pause ;;
-        10) fn_unban_ip; _pause ;;
-        q|Q) exit 0 ;;
-        *) _log "$C_RED" "无效选项，请重新输入。"; sleep 1 ;;
-    esac
+    while true; do
+        echo ""
+        echo -e "${BLUE}--- Fail2ban 智能管理脚本 (v2.0) ---${NC}"
+        echo " 1. 安装 Fail2ban (自动配置并启动)"
+        echo " 2. 卸载 Fail2ban"
+        echo " ---------------------------------------"
+        echo " 3. 启动 / 重启 Fail2ban 服务"
+        echo " 4. 停止 Fail2ban 服务"
+        echo " 5. 查看 SSHD 防护状态和日志"
+        echo " 6. 查看当前本地配置文件"
+        echo " 0. 退出脚本"
+        echo -e "${BLUE}---------------------------------------${NC}"
+        read -p "请输入选项 [0-6]: " option
+
+        # 清屏以便显示操作结果
+        clear
+        
+        case $option in
+            1) install_fail2ban ;;
+            2) uninstall_fail2ban ;;
+            3) start_service ;;
+            4) stop_service ;;
+            5) view_log ;;
+            6) view_config ;;
+            0) echo -e "${GREEN}👋 再见！${NC}"; exit 0 ;;
+            *) echo -e "${RED}❌ 无效选项，请重试。${NC}" ;;
+        esac
+        
+        echo ""
+        read -n 1 -s -r -p "按任意键返回主菜单..."
+        clear
+    done
 }
 
 # --- 脚本入口 ---
-while true; do
-    main_menu
-done
+check_root
+detect_pkg_manager
+main_menu
