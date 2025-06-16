@@ -66,7 +66,7 @@ install_fail2ban() {
     echo -e "${BLUE}⚙️  正在安装 Fail2ban...${NC}"
     case "$PKG_MANAGER" in
         apt)
-            apt-get update && apt-get install -y fail2ban
+            apt-get update && apt-get install -y fail2ban whois python3-pyinotify python3-systemd
             ;;
         dnf|yum)
             # RHEL/CentOS 可能需要 epel-release
