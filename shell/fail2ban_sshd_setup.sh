@@ -3,7 +3,10 @@
 # =================================================================
 # Fail2ban 智能管理脚本
 # Author: Gemini
-# Version: 2.1
+# Version: 2.2
+#
+# 更新日志 (v2.2):
+# - 新增: 修改核心配置的功能 (bantime, findtime, maxretry)。
 #
 # 更新日志 (v2.1):
 # - 新增: 自动检测并禁用系统日志压缩，防止Fail2ban因'message repeated'而漏掉日志。
@@ -59,7 +62,7 @@ is_installed() {
     command -v fail2ban-client &> /dev/null
 }
 
-# ★★★ 检查并禁用系统日志压缩 (防止Fail2ban漏掉日志) ★★★
+# 检查并禁用系统日志压缩 (防止Fail2ban漏掉日志)
 check_and_disable_log_compression() {
     echo -e "${BLUE}🔎 正在检查系统日志压缩设置...${NC}"
     local changes_made=false
@@ -187,7 +190,7 @@ uninstall_fail2ban() {
     echo -e "${GREEN}✅ 卸载完成。${NC}"
 }
 
-# ★★★ 创建配置文件 (核心优化逻辑) ★★★
+# 创建配置文件 (核心优化逻辑)
 create_config() {
     echo -e "${BLUE}📝 正在分析系统环境并创建自定义配置文件...${NC}"
     local banaction=""
@@ -251,7 +254,7 @@ EOF
     if [ -f /var/log/auth.log ] || [ -f /var/log/secure ]; then
         echo -e "${GREEN}🔎 检测到传统日志文件，为 [sshd] 使用 logpath。${NC}"
         
-        # ★★★ 调用日志压缩检查函数 ★★★
+        # 调用日志压缩检查函数
         check_and_disable_log_compression
 
         echo "logpath = %(sshd_log)s" >> "$JAIL_LOCAL_CONF"
@@ -352,13 +355,82 @@ view_config() {
     fi
 }
 
+# ★★★ 新增：修改配置的辅助函数 ★★★
+update_config_value() {
+    local key="$1"
+    local value="$2"
+    local file="$3"
+    # 如果键存在，则替换该行的值；如果不存在，则在[DEFAULT]后添加
+    if grep -q "^\s*${key}\s*=" "${file}"; then
+        # 使用 sed 替换已存在的行
+        sed -i "s/^\s*${key}\s*=.*/${key} = ${value}/" "${file}"
+    else
+        # 如果键不存在，则在 [DEFAULT] 部分下添加它
+        sed -i "/\[DEFAULT\]/a ${key} = ${value}" "${file}"
+    fi
+}
+
+# ★★★ 新增：7. 修改核心配置 ★★★
+modify_config() {
+    if [ ! -f "$JAIL_LOCAL_CONF" ]; then
+        echo -e "${RED}❌ 错误：配置文件 $JAIL_LOCAL_CONF 不存在。${NC}"
+        echo -e "${YELLOW}请先运行安装选项 (1) 来创建默认配置。${NC}"
+        return
+    fi
+
+    echo -e "${BLUE}--- 🔧 修改 Fail2ban 配置 ---${NC}"
+    echo "请输入新值，或直接按 Enter 保留当前值。"
+
+    # 读取并显示当前值，使用 grep 和 cut 提高兼容性
+    current_bantime=$(grep "^\s*bantime" "$JAIL_LOCAL_CONF" | cut -d '=' -f 2- | xargs)
+    current_findtime=$(grep "^\s*findtime" "$JAIL_LOCAL_CONF" | cut -d '=' -f 2- | xargs)
+    current_maxretry=$(grep "^\s*maxretry" "$JAIL_LOCAL_CONF" | cut -d '=' -f 2- | xargs)
+
+    # 获取用户输入
+    read -p "设置封禁时长 (bantime) [当前: ${current_bantime}]: " new_bantime
+    read -p "设置检测时长 (findtime) [当前: ${current_findtime}]: " new_findtime
+    read -p "设置最大重试次数 (maxretry) [当前: ${current_maxretry}]: " new_maxretry
+
+    local changes_made=false
+
+    # 更新值
+    if [ -n "$new_bantime" ]; then
+        update_config_value "bantime" "$new_bantime" "$JAIL_LOCAL_CONF"
+        changes_made=true
+    fi
+
+    if [ -n "$new_findtime" ]; then
+        update_config_value "findtime" "$new_findtime" "$JAIL_LOCAL_CONF"
+        changes_made=true
+    fi
+
+    if [ -n "$new_maxretry" ]; then
+        update_config_value "maxretry" "$new_maxretry" "$JAIL_LOCAL_CONF"
+        changes_made=true
+    fi
+
+    if [ "$changes_made" = true ]; then
+        echo -e "${GREEN}✅ 配置已更新！${NC}"
+        view_config # 调用 view_config 函数显示新配置
+
+        read -p "❓ 是否立即重启 Fail2ban 服务以应用新配置? [Y/n]: " choice
+        if [[ -z "$choice" || "$choice" =~ ^[Yy]$ ]]; then
+            start_service
+        else
+            echo -e "${YELLOW}提醒：配置已修改，但服务未重启，新配置将在下次重启后生效。${NC}"
+        fi
+    else
+        echo -e "${GREEN}✅ 未做任何修改。${NC}"
+    fi
+}
+
 
 # --- 主菜单 ---
 main_menu() {
     clear
     while true; do
         echo ""
-        echo -e "${BLUE}--- Fail2ban 智能管理脚本 (v2.1) ---${NC}"
+        echo -e "${BLUE}--- Fail2ban 智能管理脚本 (v2.2) ---${NC}"
         echo " 1. 安装 Fail2ban (自动配置并启动)"
         echo " 2. 卸载 Fail2ban"
         echo " ---------------------------------------"
@@ -366,9 +438,10 @@ main_menu() {
         echo " 4. 停止 Fail2ban 服务"
         echo " 5. 查看 SSHD 防护状态和日志"
         echo " 6. 查看当前本地配置文件"
+        echo -e "${YELLOW} 7. 修改 Fail2ban 核心配置${NC}"
         echo " 0. 退出脚本"
         echo -e "${BLUE}---------------------------------------${NC}"
-        read -p "请输入选项 [0-6]: " option
+        read -p "请输入选项 [0-7]: " option
 
         # 清屏以便显示操作结果
         clear
@@ -380,6 +453,7 @@ main_menu() {
             4) stop_service ;;
             5) view_log ;;
             6) view_config ;;
+            7) modify_config ;;
             0) echo -e "${GREEN}👋 再见！${NC}"; exit 0 ;;
             *) echo -e "${RED}❌ 无效选项，请重试。${NC}" ;;
         esac
