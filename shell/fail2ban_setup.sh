@@ -5,7 +5,7 @@
 #
 # 功能:
 #   - 提供菜单式交互界面
-#   - 安装、卸载 Fail2ban
+#   - 安装、卸载、修改配置
 #   - 启动、停止、重启服务
 #   - 查看日志、黑名单
 #   - 手动封禁、解封 IP
@@ -72,6 +72,36 @@ _get_pkg_manager() {
     fi
 }
 
+# 生成配置文件
+_generate_config_file() {
+    local ignore_ip=$1
+    local ban_time=$2
+    local max_retry=$3
+    local ssh_port=$4
+    local ssh_max_retry=$5
+
+    _log "$C_BLUE" "正在创建配置文件: $JAIL_LOCAL_PATH"
+    if [ -f "$JAIL_LOCAL_PATH" ]; then
+        mv "$JAIL_LOCAL_PATH" "${JAIL_LOCAL_PATH}.bak_$(date +%F_%T)"
+    fi
+
+    cat << EOF > "$JAIL_LOCAL_PATH"
+[DEFAULT]
+ignoreip = ${ignore_ip}
+bantime  = ${ban_time}
+findtime = 10m
+maxretry = ${max_retry}
+banaction = iptables-multiport
+
+[sshd]
+enabled = true
+port    = ${ssh_port}
+maxretry = ${ssh_max_retry}
+EOF
+    _log "$C_GREEN" "配置文件已更新。"
+}
+
+
 # --- 核心功能函数 ---
 
 # 1. 安装与配置 Fail2ban
@@ -87,20 +117,20 @@ fn_install() {
     _log "$C_CYAN" "--- 开始安装与配置 Fail2ban ---"
 
     # 获取用户配置
-    read -p "请输入您的白名单 IP (多个用空格隔开, 强烈建议添加本机公网IP): " IGNORE_IP
-    IGNORE_IP="127.0.0.1/8 ::1 ${IGNORE_IP}"
+    read -p "请输入您的白名单 IP (多个用空格隔开, 强烈建议添加本机公网IP): " ignore_ip
+    ignore_ip="127.0.0.1/8 ::1 ${ignore_ip}"
     
-    read -p "请输入全局封禁时间 (例如 1d, 2h, 30m) [默认: 1d]: " BAN_TIME
-    [ -z "$BAN_TIME" ] && BAN_TIME="1d"
+    read -p "请输入全局封禁时间 (例如 1d, 2h, 30m) [默认: 1d]: " ban_time
+    [ -z "$ban_time" ] && ban_time="1d"
     
-    read -p "请输入全局最大重试次数 [默认: 5]: " MAX_RETRY
-    [ -z "$MAX_RETRY" ] && MAX_RETRY="5"
+    read -p "请输入全局最大重试次数 [默认: 5]: " max_retry
+    [ -z "$max_retry" ] && max_retry="5"
     
-    read -p "请输入 SSH 服务的端口号 [默认: 22]: " SSH_PORT
-    [ -z "$SSH_PORT" ] && SSH_PORT="22"
+    read -p "请输入 SSH 服务的端口号 [默认: 22]: " ssh_port
+    [ -z "$ssh_port" ] && ssh_port="22"
 
-    read -p "请输入 SSH 服务的最大重试次数 [默认: 3]: " SSH_MAX_RETRY
-    [ -z "$SSH_MAX_RETRY" ] && SSH_MAX_RETRY="3"
+    read -p "请输入 SSH 服务的最大重试次数 [默认: 3]: " ssh_max_retry
+    [ -z "$ssh_max_retry" ] && ssh_max_retry="3"
 
     # 安装
     PKG_MANAGER=$(_get_pkg_manager)
@@ -117,30 +147,54 @@ fn_install() {
     _log "$C_GREEN" "Fail2ban 安装成功。"
 
     # 配置
-    _log "$C_BLUE" "正在创建配置文件: $JAIL_LOCAL_PATH"
-    if [ -f "$JAIL_LOCAL_PATH" ]; then
-        mv "$JAIL_LOCAL_PATH" "${JAIL_LOCAL_PATH}.bak_$(date +%F_%T)"
-    fi
-
-    cat << EOF > "$JAIL_LOCAL_PATH"
-[DEFAULT]
-ignoreip = ${IGNORE_IP}
-bantime  = ${BAN_TIME}
-findtime = 10m
-maxretry = ${MAX_RETRY}
-banaction = iptables-multiport
-
-[sshd]
-enabled = true
-port    = ${SSH_PORT}
-maxretry = ${SSH_MAX_RETRY}
-EOF
+    _generate_config_file "$ignore_ip" "$ban_time" "$max_retry" "$ssh_port" "$ssh_max_retry"
     
-    _log "$C_GREEN" "配置文件创建成功。"
     fn_start
 }
 
-# 2. 卸载 Fail2ban
+# 2. 修改配置
+fn_modify_config() {
+    if [ ! -f "$JAIL_LOCAL_PATH" ]; then
+        _log "$C_RED" "未找到配置文件 $JAIL_LOCAL_PATH。请先执行安装。"
+        return
+    fi
+
+    _log "$C_CYAN" "--- 修改 Fail2ban 配置 ---"
+    _log "$C_BLUE" "将显示当前配置，直接按回车键将保留原值。"
+
+    # 从文件中读取当前配置
+    current_ignore_ip=$(grep -E "^\s*ignoreip\s*=" "$JAIL_LOCAL_PATH" | sed 's/.*=\s*//')
+    current_bantime=$(grep -E "^\s*bantime\s*=" "$JAIL_LOCAL_PATH" | sed 's/.*=\s*//')
+    current_max_retry=$(grep -E "^\s*maxretry\s*=" "$JAIL_LOCAL_PATH" | sed 's/.*=\s*//' | head -n 1) # [DEFAULT]中的值
+    current_ssh_port=$(grep -E "^\s*port\s*=" "$JAIL_LOCAL_PATH" | sed 's/.*=\s*//')
+    current_ssh_max_retry=$(grep -E "^\s*maxretry\s*=" "$JAIL_LOCAL_PATH" | sed 's/.*=\s*//' | tail -n 1) # [sshd]中的值
+
+    read -p "白名单 IP [当前: $current_ignore_ip]: " new_ignore_ip
+    [ -z "$new_ignore_ip" ] && new_ignore_ip=$current_ignore_ip
+
+    read -p "全局封禁时间 [当前: $current_bantime]: " new_bantime
+    [ -z "$new_bantime" ] && new_bantime=$current_bantime
+    
+    read -p "全局最大重试次数 [当前: $current_max_retry]: " new_max_retry
+    [ -z "$new_max_retry" ] && new_max_retry=$current_max_retry
+
+    read -p "SSH 端口 [当前: $current_ssh_port]: " new_ssh_port
+    [ -z "$new_ssh_port" ] && new_ssh_port=$current_ssh_port
+
+    read -p "SSH 最大重试次数 [当前: $current_ssh_max_retry]: " new_ssh_max_retry
+    [ -z "$new_ssh_max_retry" ] && new_ssh_max_retry=$current_ssh_max_retry
+
+    _generate_config_file "$new_ignore_ip" "$new_bantime" "$new_max_retry" "$new_ssh_port" "$new_ssh_max_retry"
+
+    _log "$C_YELLOW" "配置已更新。是否立即重启 Fail2ban 使新配置生效？[Y/n]"
+    read -r choice
+    if [[ ! "$choice" =~ ^[Nn]$ ]]; then
+        fn_start
+    fi
+}
+
+
+# 3. 卸载 Fail2ban
 fn_uninstall() {
     if ! _check_installed; then return; fi
     
@@ -166,7 +220,7 @@ fn_uninstall() {
     _log "$C_GREEN" "Fail2ban 卸载完成。"
 }
 
-# 3. 启动 Fail2ban
+# 4. 启动 Fail2ban
 fn_start() {
     if ! _check_installed; then return; fi
     _log "$C_BLUE" "正在启动并设置 Fail2ban 开机自启..."
@@ -176,7 +230,7 @@ fn_start() {
     systemctl status fail2ban --no-pager -l
 }
 
-# 4. 停止 Fail2ban
+# 5. 停止 Fail2ban
 fn_stop() {
     if ! _check_installed; then return; fi
     _log "$C_BLUE" "正在停止并禁用 Fail2ban 开机自启..."
@@ -186,7 +240,26 @@ fn_stop() {
     systemctl status fail2ban --no-pager -l
 }
 
-# 5. 查看所有日志
+# 6. 查看当前黑名单
+fn_view_banned_list() {
+    if ! _check_installed; then return; fi
+    _log "$C_CYAN" "--- 查看当前黑名单 ---"
+    
+    Jails=$(fail2ban-client status | grep "Jail list" | sed -E 's/.*Jail list:[ \t]+//' | sed 's/,//g')
+    if [ -z "$Jails" ]; then
+        _log "$C_YELLOW" "当前没有活动的 Jail。"
+        return
+    fi
+    
+    _log "$C_BLUE" "当前活动的 Jails: $Jails"
+    for jail in $Jails; do
+        _log "$C_CYAN" "--- Jail: $jail ---"
+        fail2ban-client status "$jail"
+        echo ""
+    done
+}
+
+# 7. 查看所有日志
 fn_view_all_logs() {
     if ! _check_installed; then return; fi
     if [ -f "$LOG_PATH" ]; then
@@ -196,7 +269,7 @@ fn_view_all_logs() {
     fi
 }
 
-# 6. 查看失败日志 (Ban/Unban)
+# 8. 查看失败日志 (Ban/Unban)
 fn_view_failure_logs() {
     if ! _check_installed; then return; fi
     if [ -f "$LOG_PATH" ]; then
@@ -207,7 +280,7 @@ fn_view_failure_logs() {
     fi
 }
 
-# 7. 增加禁止 IP
+# 9. 增加禁止 IP
 fn_ban_ip() {
     if ! _check_installed; then return; fi
     _log "$C_CYAN" "--- 手动封禁 IP ---"
@@ -229,7 +302,7 @@ fn_ban_ip() {
     _log "$C_GREEN" "IP $ip 已在 Jail [$jail] 中被封禁。"
 }
 
-# 8. 放行 IP
+# 10. 放行 IP
 fn_unban_ip() {
     if ! _check_installed; then return; fi
     _log "$C_CYAN" "--- 手动解封 IP ---"
@@ -251,25 +324,6 @@ fn_unban_ip() {
     _log "$C_GREEN" "IP $ip 已在 Jail [$jail] 中被解封。"
 }
 
-# 9. 查看当前黑名单
-fn_view_banned_list() {
-    if ! _check_installed; then return; fi
-    _log "$C_CYAN" "--- 查看当前黑名单 ---"
-    
-    Jails=$(fail2ban-client status | grep "Jail list" | sed -E 's/.*Jail list:[ \t]+//' | sed 's/,//g')
-    if [ -z "$Jails" ]; then
-        _log "$C_YELLOW" "当前没有活动的 Jail。"
-        return
-    fi
-    
-    _log "$C_BLUE" "当前活动的 Jails: $Jails"
-    for jail in $Jails; do
-        _log "$C_CYAN" "--- Jail: $jail ---"
-        fail2ban-client status "$jail"
-        echo ""
-    done
-}
-
 
 # --- 主菜单 ---
 main_menu() {
@@ -278,35 +332,41 @@ main_menu() {
     echo "================================================="
     _log "$C_CYAN" "          Fail2ban 交互式管理脚本"
     echo "================================================="
+    echo "  安装与管理"
     _log "$C_GREEN" "  1. 安装并配置 Fail2ban"
-    _log "$C_RED"   "  2. 卸载 Fail2ban"
+    _log "$C_YELLOW" "  2. 修改 Fail2ban 配置"
+    _log "$C_RED"   "  3. 卸载 Fail2ban"
     echo "-------------------------------------------------"
-    _log "$C_GREEN" "  3. 启动并自启 Fail2ban"
-    _log "$C_YELLOW" "  4. 停止并禁用 Fail2ban"
+    echo "  服务控制"
+    _log "$C_GREEN" "  4. 启动并自启 Fail2ban"
+    _log "$C_YELLOW" "  5. 停止并禁用 Fail2ban"
     echo "-------------------------------------------------"
-    _log "$C_BLUE" "  5. 查看 Fail2ban 所有日志"
-    _log "$C_BLUE" "  6. 查看封禁/解封日志"
-    _log "$C_BLUE" "  7. 查看当前黑名单"
+    echo "  监控与日志"
+    _log "$C_BLUE" "  6. 查看当前黑名单"
+    _log "$C_BLUE" "  7. 查看所有日志"
+    _log "$C_BLUE" "  8. 查看封禁/解封日志"
     echo "-------------------------------------------------"
-    _log "$C_RED"   "  8. 手动封禁一个 IP"
-    _log "$C_GREEN" "  9. 手动解封一个 IP"
+    echo "  手动操作"
+    _log "$C_RED"   "  9. 手动封禁一个 IP"
+    _log "$C_GREEN" " 10. 手动解封一个 IP"
     echo "-------------------------------------------------"
-    _log "$C_YELLOW" "  q. 退出脚本"
+    _log "$C_YELLOW" "   q. 退出脚本"
     echo "================================================="
-    read -p "请输入您的选项 [1-9, q]: " choice
+    read -p "请输入您的选项: " choice
     
     case $choice in
         1) fn_install; _pause ;;
-        2) fn_uninstall; _pause ;;
-        3) fn_start; _pause ;;
-        4) fn_stop; _pause ;;
-        5) fn_view_all_logs; _pause ;;
-        6) fn_view_failure_logs; _pause ;;
-        7) fn_view_banned_list; _pause ;;
-        8) fn_ban_ip; _pause ;;
-        9) fn_unban_ip; _pause ;;
+        2) fn_modify_config; _pause ;;
+        3) fn_uninstall; _pause ;;
+        4) fn_start; _pause ;;
+        5) fn_stop; _pause ;;
+        6) fn_view_banned_list; _pause ;;
+        7) fn_view_all_logs; _pause ;;
+        8) fn_view_failure_logs; _pause ;;
+        9) fn_ban_ip; _pause ;;
+        10) fn_unban_ip; _pause ;;
         q|Q) exit 0 ;;
-        *) _log "$C_RED" "无效选项，请输入 1-9 或 q。"; sleep 1 ;;
+        *) _log "$C_RED" "无效选项，请重新输入。"; sleep 1 ;;
     esac
 }
 
