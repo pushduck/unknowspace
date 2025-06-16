@@ -3,7 +3,10 @@
 # =================================================================
 # Fail2ban 智能管理脚本
 # Author: Gemini
-# Version: 2.0
+# Version: 2.1
+#
+# 更新日志 (v2.1):
+# - 新增: 自动检测并禁用系统日志压缩，防止Fail2ban因'message repeated'而漏掉日志。
 #
 # 功能:
 # - 自动检测并适配包管理器 (apt, dnf, yum)
@@ -32,8 +35,8 @@ SSHD_JAIL_NAME="sshd"
 # 检查是否以 root 权限运行
 check_root() {
     if [[ $EUID -ne 0 ]]; then
-       echo -e "${RED}❌ 错误：此脚本需要以 root 或 sudo 权限运行。${NC}" 
-       exit 1
+        echo -e "${RED}❌ 错误：此脚本需要以 root 或 sudo 权限运行。${NC}" 
+        exit 1
     fi
 }
 
@@ -55,6 +58,70 @@ detect_pkg_manager() {
 is_installed() {
     command -v fail2ban-client &> /dev/null
 }
+
+# ★★★ 检查并禁用系统日志压缩 (防止Fail2ban漏掉日志) ★★★
+check_and_disable_log_compression() {
+    echo -e "${BLUE}🔎 正在检查系统日志压缩设置...${NC}"
+    local changes_made=false
+    local restart_rsyslog=false
+    local restart_journald=false
+    
+    # --- 检查并修复 rsyslog ---
+    local rsyslog_conf="/etc/rsyslog.conf"
+    if [ -f "$rsyslog_conf" ]; then
+        # 检查是否明确开启了压缩
+        if grep -q "^\s*\$RepeatedMsgReduction\s\+on" "$rsyslog_conf"; then
+            echo -e "${YELLOW}⚠️  检测到 rsyslog 开启了日志压缩，正在禁用...${NC}"
+            # 使用 sed 将 'on' 修改为 'off'，-i 表示直接修改文件
+            sed -i 's/^\(\s*\$RepeatedMsgReduction\s\+\)on/\1off/' "$rsyslog_conf"
+            changes_made=true
+            restart_rsyslog=true
+        fi
+    fi
+
+    # --- 检查并修复 systemd-journald ---
+    local journald_conf="/etc/systemd/journald.conf"
+    if [ -f "$journald_conf" ]; then
+        # 如果速率限制没有被明确设置为0，则认为它是开启的（默认行为）
+        if ! grep -q "^\s*RateLimitIntervalSec\s*=\s*0" "$journald_conf" || ! grep -q "^\s*RateLimitBurst\s*=\s*0" "$journald_conf"; then
+            echo -e "${YELLOW}⚠️  检测到 systemd-journald 开启了速率限制，正在禁用...${NC}"
+            # 使用 sed 修改或添加配置项
+            # 如果行存在（无论是否注释），修改它
+            if grep -q "RateLimitIntervalSec" "$journald_conf"; then
+                sed -i -E 's/^\s*#?\s*RateLimitIntervalSec\s*=.*/RateLimitIntervalSec=0/' "$journald_conf"
+            else
+                # 如果不存在，追加到文件末尾
+                echo "RateLimitIntervalSec=0" >> "$journald_conf"
+            fi
+            
+            if grep -q "RateLimitBurst" "$journald_conf"; then
+                sed -i -E 's/^\s*#?\s*RateLimitBurst\s*=.*/RateLimitBurst=0/' "$journald_conf"
+            else
+                echo "RateLimitBurst=0" >> "$journald_conf"
+            fi
+            
+            changes_made=true
+            restart_journald=true
+        fi
+    fi
+
+    # --- 根据修改情况重启服务 ---
+    if [ "$changes_made" = true ]; then
+        echo -e "${BLUE}⚙️  正在应用日志配置变更...${NC}"
+        if [ "$restart_journald" = true ]; then
+            echo "正在重启 systemd-journald 服务..."
+            systemctl restart systemd-journald
+        fi
+        if [ "$restart_rsyslog" = true ]; then
+            echo "正在重启 rsyslog 服务..."
+            systemctl restart rsyslog
+        fi
+        echo -e "${GREEN}✅ 日志压缩/速率限制已成功禁用。${NC}"
+    else
+        echo -e "${GREEN}✅ 日志压缩设置正常，无需修改。${NC}"
+    fi
+}
+
 
 # 1. 安装 Fail2ban
 install_fail2ban() {
@@ -180,9 +247,13 @@ maxretry = 5
 enabled = true
 EOF
 
-    # 步骤 3: 智能判断并配置 sshd 日志后端
+    # 步骤 4: 智能判断并配置 sshd 日志后端
     if [ -f /var/log/auth.log ] || [ -f /var/log/secure ]; then
         echo -e "${GREEN}🔎 检测到传统日志文件，为 [sshd] 使用 logpath。${NC}"
+        
+        # ★★★ 调用日志压缩检查函数 ★★★
+        check_and_disable_log_compression
+
         echo "logpath = %(sshd_log)s" >> "$JAIL_LOCAL_CONF"
         echo "backend = auto" >> "$JAIL_LOCAL_CONF"
     else
@@ -287,7 +358,7 @@ main_menu() {
     clear
     while true; do
         echo ""
-        echo -e "${BLUE}--- Fail2ban 智能管理脚本 (v2.0) ---${NC}"
+        echo -e "${BLUE}--- Fail2ban 智能管理脚本 (v2.1) ---${NC}"
         echo " 1. 安装 Fail2ban (自动配置并启动)"
         echo " 2. 卸载 Fail2ban"
         echo " ---------------------------------------"
