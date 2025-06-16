@@ -256,7 +256,7 @@ maxretry = 1
 # --- SSHD Protection ---
 [sshd]
 enabled = true
-port = ssh,sftp
+port = ssh
 EOF
 
     # 步骤 4: 智能判断并配置 sshd 日志后端
