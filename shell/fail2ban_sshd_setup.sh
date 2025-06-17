@@ -627,6 +627,7 @@ EOF
         echo -e "${GREEN}✅ 测试消息发送成功！请检查您的 Telegram。${NC}"
     else
         echo -e "${RED}❌ 测试消息发送失败。${NC}"
+        echo -e "${CHAT_ID} | ${BOT_TOKEN}"
         echo -e "${YELLOW}👉 请检查您的 Bot Token 和 Chat ID 是否正确，以及服务器网络是否能访问 Telegram API。${NC}"
         # 尝试从返回的 JSON 中提取错误描述
         error_desc=$(echo "$test_response" | grep -o '"description":"[^"]*"' | cut -d '"' -f 4)
