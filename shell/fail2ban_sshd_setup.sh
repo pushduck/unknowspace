@@ -521,17 +521,16 @@ WHOIS_INFO=$(whois $IP | grep -E "Country|OrgName|City|StateProv" | tr '\n' '; '
 GEOIP_INFO=$(geoiplookup $IP | grep "GeoIP City" | awk -F": " '{print $2}')
 
 # Message formatting for Markdown
-MESSAGE="🛡️ *Fail2Ban Alert* 🛡️
-
-**Hostname： \`${HOSTNAME}\`**
-
-*Timestamp:* \`${LOG_DATE}\`
-*Banned IP:* \`${IP}\`
-*Jail Name:* \`${JAIL}\`
-*Protocol:* \`${PROTOCOL}\`
-*Port:* \`${PORT}\`
-*Whois Info:* \`${WHOIS_INFO}\`
-*GeoIP Info:* \`${GEOIP_INFO}\`"
+MESSAGE="🤖主机名: \`${HOSTNAME}\`
+-------------------------------
+*🚫禁止IP:* ${IP}
+*服务名称:* ${JAIL}
+-------------------------------
+*Whois:* ${WHOIS_INFO}
+*GeoIP:* ${GEOIP_INFO}
+-------------------------------
+${LOG_DATE}
+_本消息由 Fail2Ban 自动发送_"
 
 # API URL
 URL="https://api.telegram.org/bot${BOT_TOKEN}/sendMessage"
