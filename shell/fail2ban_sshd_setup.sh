@@ -543,7 +543,7 @@ IP="$1"
 JAIL="$2"
 PROTOCOL="$3"
 PORT="$4"
-HOSTNAME=$(hostname -f)
+HOSTNAME=$(hostname)
 LOG_DATE=$(date)
 
 # 查询 whois 信息
@@ -613,7 +613,7 @@ EOF
     echo -e "${BLUE}🚀 正在发送测试消息以验证配置...${NC}"
 
     # 构造测试消息
-    hostname_f=$(hostname -f)
+    hostname_f=$(hostname)
     test_message="✅ *Fail2Ban 配置成功* ✅ | 监控告警已为服务器 \`$public_ip\` (*$hostname_f*) 开启。[_这是一条自动发送的测试消息。_]"
 
     # 使用 curl 发送测试消息
