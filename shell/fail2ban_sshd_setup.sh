@@ -481,6 +481,11 @@ configure_telegram() {
     local TELEGRAM_ACTION_CONF="/etc/fail2ban/action.d/telegram.conf"
     local TELEGRAM_NOTIFY_SCRIPT="/etc/fail2ban/action.d/telegram-notify.sh"
 
+    if [ -f "$TELEGRAM_ACTION_CONF" ] || [ -f "TELEGRAM_NOTIFY_SCRIPT" ]; then
+        echo -e "${RED}❌ Telegram 配置已存在 ${TELEGRAM_NOTIFY_SCRIPT}。${NC}"
+        return 1
+    fi
+
     echo -e "${BLUE}📝 正在创建 Telegram action 配置文件...${NC}"
     # 创建 Fail2ban 的 action 文件
     cat > "$TELEGRAM_ACTION_CONF" << EOF
