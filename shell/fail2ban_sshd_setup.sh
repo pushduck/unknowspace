@@ -481,9 +481,12 @@ configure_telegram() {
     local TELEGRAM_ACTION_CONF="/etc/fail2ban/action.d/telegram.conf"
     local TELEGRAM_NOTIFY_SCRIPT="/etc/fail2ban/action.d/telegram-notify.sh"
 
-    if [ -f "$TELEGRAM_ACTION_CONF" ] || [ -f "TELEGRAM_NOTIFY_SCRIPT" ]; then
-        echo -e "${RED}❌ Telegram 配置已存在 ${TELEGRAM_NOTIFY_SCRIPT}。${NC}"
-        return 1
+    # 检查是否已存在 Telegram 配置
+    local is_modify=0
+    if [ -f "$TELEGRAM_ACTION_CONF" ] || [ -f "$TELEGRAM_NOTIFY_SCRIPT" ]; then
+        #echo -e "${RED}❌ Telegram 配置已存在 ${TELEGRAM_NOTIFY_SCRIPT}。${NC}"
+        #return 1
+        is_modify=1
     fi
 
     echo -e "${BLUE}📝 正在创建 Telegram action 配置文件...${NC}"
@@ -562,22 +565,26 @@ EOF
         return 1
     fi
 
-    echo -e "${BLUE}🔧 正在更新 $JAIL_LOCAL_CONF 以启用通知...${NC}"
-    # 检查 [sshd] 监牢中是否已配置 telegram action
-    if sed -n '/^\[sshd\]/,/^\[/p' "$JAIL_LOCAL_CONF" | grep -q "^\s*action\s*.*telegram"; then
-        echo -e "${YELLOW}⚠️ Telegram 通知似乎已在 [sshd] 部分配置。跳过修改。${NC}"
-    else
-        # 为防止冲突，先删除 [sshd] 中可能存在的旧 action 行
-        sed -i '/^\[sshd\]/,/^\[/ { /^\s*action\s*=/d; }' "$JAIL_LOCAL_CONF"
+    if [ $is_modify -eq 0 ]; then
+        echo -e "${BLUE}🔧 正在更新 $JAIL_LOCAL_CONF 以启用通知...${NC}"
+        # 检查 [sshd] 监牢中是否已配置 telegram action
+        if sed -n '/^\[sshd\]/,/^\[/p' "$JAIL_LOCAL_CONF" | grep -q "^\s*action\s*.*telegram"; then
+            echo -e "${YELLOW}⚠️ Telegram 通知似乎已在 [sshd] 部分配置。跳过修改。${NC}"
+        else
+            # 为防止冲突，先删除 [sshd] 中可能存在的旧 action 行
+            sed -i '/^\[sshd\]/,/^\[/ { /^\s*action\s*=/d; }' "$JAIL_LOCAL_CONF"
 
-        # --- FIX START: Use correct single '%' for fail2ban variables ---
-        # 在 [sshd] 标题后添加新的组合 action
-        # 这将同时执行默认的封禁动作 (%(action_)) 和 telegram 通知
-        sed -i '/^\[sshd\]/a action = %(action_)s' "$JAIL_LOCAL_CONF"
-        sed -i '/^action = %(action_)s/a \         telegram' "$JAIL_LOCAL_CONF"
-        # --- FIX END ---
-        
-        echo -e "${GREEN}✅ 已为 [sshd] 监牢启用 Telegram 通知。${NC}"
+            # --- FIX START: Use correct single '%' for fail2ban variables ---
+            # 在 [sshd] 标题后添加新的组合 action
+            # 这将同时执行默认的封禁动作 (%(action_)) 和 telegram 通知
+            sed -i '/^\[sshd\]/a action = %(action_)s' "$JAIL_LOCAL_CONF"
+            sed -i '/^action = %(action_)s/a \         telegram' "$JAIL_LOCAL_CONF"
+            # --- FIX END ---
+            
+            echo -e "${GREEN}✅ 已为 [sshd] 监牢启用 Telegram 通知。${NC}"
+        fi
+    else
+        echo -e "${YELLOW}⚠️ 已经更新 Telegram 通知模板。跳过修改 $JAIL_LOCAL_CONF。${NC}"
     fi
 
     # --- ★★★ 新增：发送测试消息 ★★★ ---
@@ -633,7 +640,7 @@ main_menu() {
         echo " 5. 查看 SSHD 防护状态和日志"
         echo " 6. 查看当前本地配置文件"
         echo " 7. 修改 Fail2ban 核心配置"
-        echo -e "${GREEN} 8. 配置 Telegram 通知 (含测试)${NC}"
+        echo -e "${GREEN} 8. 新增 / 更新 Telegram 通知${NC}"
         echo " 0. 退出脚本"
         echo -e "${BLUE}---------------------------------------${NC}"
         read -p "请输入选项 [0-8]: " option
