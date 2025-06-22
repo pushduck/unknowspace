@@ -469,11 +469,35 @@ configure_telegram() {
         fi
     fi
 
-    echo -e "${BLUE}--- 🔧 配置 Telegram Bot 通知 ---${NC}"
-    read -p "请输入你的 Bot Token: " bot_token
-    read -p "请输入你的 Chat ID: " chat_id
-
-    if [ -z "$bot_token" ] || [ -z "$chat_id" ]; then
+    # 定义 .env.telegram 文件路径
+    ENV_FILE="$HOME/.env.telegram"
+    # 读取 .env.telegram 文件
+    if [ -f "$ENV_FILE" ]; then
+        while IFS='=' read -r key value; do
+            # 跳过空行或注释行
+            [[ -z "$key" || "$key" =~ ^# ]] && continue
+            # 去除首尾空格，保留值中的内部空格
+            key=$(echo "$key" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+            value=$(echo "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+            # 去除值的引号（如果存在）
+            value=$(echo "$value" | sed -e 's/^"//' -e 's/"$//')
+            # 安全赋值，避免 eval
+            export "$key=$value"
+        done < "$ENV_FILE"
+    else
+        echo -e "${BLUE}--- 🔧 配置 Telegram Bot 通知 ---${NC}"
+        read -p "请输入你的 Bot Token: " bot_token
+        read -p "请输入你的 Chat ID: " chat_id
+        # 保存到 .env.telegram 文件
+        echo "BOT_TOKEN=\"$bot_token\"" > "$ENV_FILE"
+        echo "CHAT_ID=\"$chat_id\"" >> "$ENV_FILE"
+        # 赋值给当前环境
+        export BOT_TOKEN="$bot_token"
+        export CHAT_ID="$chat_id"
+    fi
+    
+    # 检查变量是否为空
+    if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
         echo -e "${RED}❌ 错误：Bot Token 和 Chat ID 不能为空。${NC}"
         return 1
     fi
@@ -481,7 +505,15 @@ configure_telegram() {
     local TELEGRAM_ACTION_CONF="/etc/fail2ban/action.d/telegram.conf"
     local TELEGRAM_NOTIFY_SCRIPT="/etc/fail2ban/action.d/telegram-notify.sh"
 
-    echo -e "${BLUE}📝 正在创建 Telegram action 配置文件...${NC}"
+    # 检查是否已存在 Telegram 配置
+    local is_modify=0
+    if [ -f "$TELEGRAM_ACTION_CONF" ] || [ -f "$TELEGRAM_NOTIFY_SCRIPT" ]; then
+        #echo -e "${RED}❌ Telegram 配置已存在 ${TELEGRAM_NOTIFY_SCRIPT}。${NC}"
+        #return 1
+        is_modify=1
+    fi
+
+    echo -e "${BLUE}📝 正在生成 Telegram action 配置文件...${NC}"
     # 创建 Fail2ban 的 action 文件
     cat > "$TELEGRAM_ACTION_CONF" << EOF
 # Fail2ban action configuration for Telegram
@@ -511,7 +543,7 @@ IP="$1"
 JAIL="$2"
 PROTOCOL="$3"
 PORT="$4"
-HOSTNAME=$(hostname -f)
+HOSTNAME=$(hostname)
 LOG_DATE=$(date)
 
 # 查询 whois 信息
@@ -521,17 +553,14 @@ WHOIS_INFO=$(whois $IP | grep -E "Country|OrgName|City|StateProv" | tr '\n' '; '
 GEOIP_INFO=$(geoiplookup $IP | grep "GeoIP City" | awk -F": " '{print $2}')
 
 # Message formatting for Markdown
-MESSAGE="🛡️ *Fail2Ban Alert* 🛡️
-
-**Hostname： \`${HOSTNAME}\`**
-
-*Timestamp:* \`${LOG_DATE}\`
-*Banned IP:* \`${IP}\`
-*Jail Name:* \`${JAIL}\`
-*Protocol:* \`${PROTOCOL}\`
-*Port:* \`${PORT}\`
-*Whois Info:* \`${WHOIS_INFO}\`
-*GeoIP Info:* \`${GEOIP_INFO}\`"
+MESSAGE="*🤖主机名:* #${HOSTNAME}
+*🚫禁止IP:* ${IP}
+*服务名称:* ${JAIL}
+*Whois:* ${WHOIS_INFO}
+*GeoIP:* ${GEOIP_INFO}
+-=-=-=-=-=-=-
+${LOG_DATE}
+_本消息由 Fail2Ban 自动发送_"
 
 # API URL
 URL="https://api.telegram.org/bot${BOT_TOKEN}/sendMessage"
@@ -544,8 +573,8 @@ curl -s --max-time 15 -X POST "${URL}" \
 EOF
 
     # 替换 Token 和 Chat ID
-    sed -i "s/!!BOT_TOKEN!!/${bot_token}/" "$TELEGRAM_NOTIFY_SCRIPT"
-    sed -i "s/!!CHAT_ID!!/${chat_id}/" "$TELEGRAM_NOTIFY_SCRIPT"
+    sed -i "s/!!BOT_TOKEN!!/${BOT_TOKEN}/" "$TELEGRAM_NOTIFY_SCRIPT"
+    sed -i "s/!!CHAT_ID!!/${CHAT_ID}/" "$TELEGRAM_NOTIFY_SCRIPT"
 
     # 使脚本可执行
     chmod +x "$TELEGRAM_NOTIFY_SCRIPT"
@@ -558,35 +587,38 @@ EOF
         return 1
     fi
 
-    echo -e "${BLUE}🔧 正在更新 $JAIL_LOCAL_CONF 以启用通知...${NC}"
-    # 检查 [sshd] 监牢中是否已配置 telegram action
-    if sed -n '/^\[sshd\]/,/^\[/p' "$JAIL_LOCAL_CONF" | grep -q "^\s*action\s*.*telegram"; then
-        echo -e "${YELLOW}⚠️ Telegram 通知似乎已在 [sshd] 部分配置。跳过修改。${NC}"
-    else
-        # 为防止冲突，先删除 [sshd] 中可能存在的旧 action 行
-        sed -i '/^\[sshd\]/,/^\[/ { /^\s*action\s*=/d; }' "$JAIL_LOCAL_CONF"
+    if [ $is_modify -eq 0 ]; then
+        echo -e "${BLUE}🔧 正在更新 $JAIL_LOCAL_CONF 以启用通知...${NC}"
+        # 检查 [sshd] 监牢中是否已配置 telegram action
+        if sed -n '/^\[sshd\]/,/^\[/p' "$JAIL_LOCAL_CONF" | grep -q "^\s*action\s*.*telegram"; then
+            echo -e "${YELLOW}⚠️ Telegram 通知似乎已在 [sshd] 部分配置。跳过修改。${NC}"
+        else
+            # 为防止冲突，先删除 [sshd] 中可能存在的旧 action 行
+            sed -i '/^\[sshd\]/,/^\[/ { /^\s*action\s*=/d; }' "$JAIL_LOCAL_CONF"
 
-        # --- FIX START: Use correct single '%' for fail2ban variables ---
-        # 在 [sshd] 标题后添加新的组合 action
-        # 这将同时执行默认的封禁动作 (%(action_)) 和 telegram 通知
-        sed -i '/^\[sshd\]/a action = %(action_)s' "$JAIL_LOCAL_CONF"
-        sed -i '/^action = %(action_)s/a \         telegram' "$JAIL_LOCAL_CONF"
-        # --- FIX END ---
-        
-        echo -e "${GREEN}✅ 已为 [sshd] 监牢启用 Telegram 通知。${NC}"
+            # --- FIX START: Use correct single '%' for fail2ban variables ---
+            # 在 [sshd] 标题后添加新的组合 action
+            # 这将同时执行默认的封禁动作 (%(action_)) 和 telegram 通知
+            sed -i '/^\[sshd\]/a action = %(action_)s' "$JAIL_LOCAL_CONF"
+            sed -i '/^action = %(action_)s/a \         telegram' "$JAIL_LOCAL_CONF"
+            # --- FIX END ---
+            
+            echo -e "${GREEN}✅ 已为 [sshd] 监牢启用 Telegram 通知。${NC}"
+        fi
+    else
+        echo -e "${YELLOW}⚠️ 已经更新 Telegram 通知模板。跳过修改 $JAIL_LOCAL_CONF。${NC}"
     fi
 
-    # --- ★★★ 新增：发送测试消息 ★★★ ---
+    # --- ★★★ 发送测试消息 ★★★ ---
     echo -e "${BLUE}🚀 正在发送测试消息以验证配置...${NC}"
 
-    
     # 构造测试消息
-    hostname_f=$(hostname -f)
+    hostname_f=$(hostname)
     test_message="✅ *Fail2Ban 配置成功* ✅ | 监控告警已为服务器 \`$public_ip\` (*$hostname_f*) 开启。[_这是一条自动发送的测试消息。_]"
 
     # 使用 curl 发送测试消息
-    test_response=$(curl -s --max-time 15 -X POST "https://api.telegram.org/bot${bot_token}/sendMessage" \
-        --data-urlencode "chat_id=${chat_id}" \
+    test_response=$(curl -s --max-time 15 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+        --data-urlencode "chat_id=${CHAT_ID}" \
         --data-urlencode "text=${test_message}" \
         -d "parse_mode=Markdown")
 
@@ -595,6 +627,7 @@ EOF
         echo -e "${GREEN}✅ 测试消息发送成功！请检查您的 Telegram。${NC}"
     else
         echo -e "${RED}❌ 测试消息发送失败。${NC}"
+        echo -e "${CHAT_ID} | ${BOT_TOKEN}"
         echo -e "${YELLOW}👉 请检查您的 Bot Token 和 Chat ID 是否正确，以及服务器网络是否能访问 Telegram API。${NC}"
         # 尝试从返回的 JSON 中提取错误描述
         error_desc=$(echo "$test_response" | grep -o '"description":"[^"]*"' | cut -d '"' -f 4)
@@ -629,7 +662,7 @@ main_menu() {
         echo " 5. 查看 SSHD 防护状态和日志"
         echo " 6. 查看当前本地配置文件"
         echo " 7. 修改 Fail2ban 核心配置"
-        echo -e "${GREEN} 8. 配置 Telegram 通知 (含测试)${NC}"
+        echo -e "${GREEN} 8. 新增 / 更新 Telegram 通知${NC}"
         echo " 0. 退出脚本"
         echo -e "${BLUE}---------------------------------------${NC}"
         read -p "请输入选项 [0-8]: " option
